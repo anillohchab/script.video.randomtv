@@ -10,17 +10,18 @@ import time
 
 def log(msg):
 	xbmc.log("%s: %s" % (name,msg),level=xbmc.LOGDEBUG )
-	#xbmc.log("%s: %s" % (name,msg), xbmc.LOGNOTICE)
 
 
 def buildPlaylist(myEpisodes):
 	# Clear Playlist
 	myPlaylist.clear()
+	addPlaylist(myEpisodes)
 
+def addPlaylist(myEpisodes):
 	for myEpisode in myEpisodes:
 		log("Added Episode to Playlist: " + str(myEpisode['episodeId']) + " -- " + myEpisode['episodeShow'] + " - " + myEpisode['episodeName'])
-		myPlaylist.add(url=myEpisode['episodeFile'])
-	#
+		episodesInPlaylist.append(myEpisode)	
+		myPlaylist.add(url=myEpisode['episodeFile'])	
 
 
 def ResetPlayCount(myEpisode):
@@ -36,6 +37,40 @@ def ResetPlayCount(myEpisode):
 	response = json.loads(xbmc.executeJSONRPC(command))
 	log("-- " + str(response))
 
+def randomIndexWithWeight(tvShowIds, weights):
+	log("-- tvShowIds: " + str(tvShowIds))
+	log("-- weights: " + str(weights))
+	sumOfWeights = 0
+	for tvShowId in tvShowIds:
+		sumOfWeights += weights.get(tvShowId, 1)
+	rnd = random.randrange(sumOfWeights)
+	for tvShowId in tvShowIds:
+		if (rnd < weights.get(tvShowId, 1)):
+			return tvShowId
+		rnd -= weights.get(tvShowId, 1)
+	return 0
+
+def randomEpisodes(limit=5, tvShowEpisodes={}, tvShowIds=[], tvShowWeights={}):
+	randomlySelectedExpisodes = []
+	for i in range(limit):
+		tvShowId = randomIndexWithWeight(tvShowIds, tvShowWeights)
+		log("tvselected tvShowId=" + str(tvShowId))
+
+		if tvShowEpisodes[tvShowId]['result']['limits']['total'] <= 0:
+			i -= 1
+			continue
+
+		episodes = tvShowEpisodes[tvShowId]['result']['episodes']
+		episode = episodes[random.randrange(len(episodes))]
+		if addon.getSetting("IncludeUnwatched") != "true" and episode['playcount'] <= 0:
+			i -= 1
+			continue
+
+		randomlySelectedExpisodes.append({'episodeId': episode['episodeid'], 'episodeShow': episode['showtitle'].encode('utf-8').strip(), 'episodeName': episode['label'].encode('utf-8').strip(), 'episodeFile': episode['file'].encode('utf-8').strip(), 'playCount': episode['playcount'], 'lastPlayed': episode['lastplayed'], 'resume': episode['resume']})	
+
+		log("randomlySelectedExpisodes=" + str(randomlySelectedExpisodes))
+
+	return randomlySelectedExpisodes	
   
 class MyPlayer(xbmc.Player):
 	def __init__(self, *args):
@@ -67,14 +102,30 @@ icon = addon.getAddonInfo("icon")
 
 busyDiag = xbmcgui.DialogBusy()
 myEpisodes = []
+episodesInPlaylist = []
 
 includedShows = addon.getSetting("includedShows")
 
+# Some new settings
+playlistSizeLimit = 5
 
+log("setting showProbablitiesjson " + addon.getSetting("showProbablities"))
+showProbablities = {}
+try:
+	# Keys inside a json is always a string so converting them to string.
+	# We know it must be int so, if it fails resetting it back.
+	showProbablitiesJson = json.loads(addon.getSetting("showProbablities"))
+	for showIdStr in showProbablitiesJson:
+		showProbablities[int(showIdStr)] = showProbablitiesJson[showIdStr]
+except:
+	log("Failed to parse show probablities, resetting them to default")
+	showProbablities = {}
+
+log("read setting for showProbablities=" + str(showProbablities))
 
 # Select Shows Settings Dialog
 if len(sys.argv) > 1:
-	if sys.argv[1] == "SelectShows":
+	if sys.argv[1] == "SelectShows":		
 		log("--------- Settings - SelectShows")
 		busyDiag.create()
 		listShows = []
@@ -104,6 +155,47 @@ if len(sys.argv) > 1:
 
 		xbmc.executebuiltin('Addon.OpenSettings(%s)' % addonid)
 		xbmc.executebuiltin('SetFocus(201)')
+	elif sys.argv[1] == "ModifyShowsProbability":		
+		log("--------- Settings - ModifyShowsProbability")
+		log("start showProbablities=" + str(showProbablities))
+		tvShowIds = []
+
+		busyDiag.create()
+		if addon.getSetting("IncludeAll") == "true":
+			command = '{"jsonrpc": "2.0", "method": "VideoLibrary.GetTVShows", "id": 1}'
+			allShowIds = json.loads(xbmc.executeJSONRPC(command))
+	
+			if allShowIds['result']['limits']['total'] > 0:
+				for show in allShowIds['result']['tvshows']:
+					tvshows.append(int(show['tvshowid']))		
+		else:
+			for includedShow in map(int, includedShows.split(", ")):
+				tvShowIds.append(includedShow)	
+		
+		selectedShowTitleItems = []
+		for tvShowId in tvShowIds:
+			# command = '{"jsonrpc": "2.0", "method": "VideoLibrary.GetEpisodes", "params": { "tvshowid": %d, "properties": ["showtitle", "file", "playcount", "lastplayed", "resume"] }, "id": 1}' % tvShowId
+			command = '{"jsonrpc": "2.0", "method": "VideoLibrary.GetTVShowDetails", "params": {"tvshowid": %d}, "id": 1}'  % tvShowId
+
+			currentShowDetails = json.loads(xbmc.executeJSONRPC(command))
+			currentShowLabel = currentShowDetails['result']['tvshowdetails']['label']
+			selectedShowTitleItems.append(xbmcgui.ListItem(currentShowLabel + " : " +  str(showProbablities.get(tvShowId, 1)), currentShowLabel))
+		busyDiag.close()
+
+		perShowProbablity = []				
+		while True:
+			selectedShow = xbmcgui.Dialog().select("Select A Show", selectedShowTitleItems)
+			if selectedShow == -1:
+				break			
+			tvShowId = tvShowIds[selectedShow]
+			selectedProbablity = int(xbmcgui.Dialog().numeric(0, "Select a number", str(showProbablities.get(tvShowId, 1))))
+			showTitleItem = selectedShowTitleItems[selectedShow]
+			showTitleItem.setLabel(showTitleItem.getLabel2() + " : " + str(selectedProbablity))
+
+			showProbablities[tvShowId] = selectedProbablity
+		
+		log("end showProbablities=" + str(showProbablities))
+		addon.setSetting("showProbablities", json.dumps(showProbablities))
 	quit()
 #
 
@@ -116,33 +208,30 @@ busyDiag.create()
 backWindow = xbmcgui.Window()
 backWindow.show()
 
+tvShowIds = []
+tvShowEpisodes = {}
 
 # Get TV Episodes
 if addon.getSetting("IncludeAll") == "true":
 	command = '{"jsonrpc": "2.0", "method": "VideoLibrary.GetTVShows", "id": 1}'
-	allShows = json.loads(xbmc.executeJSONRPC(command))
+	allShowIds = json.loads(xbmc.executeJSONRPC(command))
 	
 	if allShows['result']['limits']['total'] > 0:
 		for show in allShows['result']['tvshows']:
-			command = '{"jsonrpc": "2.0", "method": "VideoLibrary.GetEpisodes", "params": { "tvshowid": %d, "properties": ["showtitle", "file", "playcount", "lastplayed", "resume"] }, "id": 1}' % (show['tvshowid'])
-			allEpisodes = json.loads(xbmc.executeJSONRPC(command))
-			
-			if allEpisodes['result']['limits']['total'] > 0:
-				for episode in allEpisodes['result']['episodes']:
-					if addon.getSetting("IncludeUnwatched") == "true" or episode['playcount'] > 0:
-						log("Added Episode: " + episode['label'].encode('utf-8').strip())
-						myEpisodes.append({'episodeId': episode['episodeid'], 'episodeShow': episode['showtitle'].encode('utf-8').strip(), 'episodeName': episode['label'].encode('utf-8').strip(), 'episodeFile': episode['file'].encode('utf-8').strip(), 'playCount': episode['playcount'], 'lastPlayed': episode['lastplayed'], 'resume': episode['resume']})
+			tvShowIds.append(int(show['tvshowid']))
 else:
 	for includedShow in map(int, includedShows.split(", ")):
-		command = '{"jsonrpc": "2.0", "method": "VideoLibrary.GetEpisodes", "params": { "tvshowid": %d, "properties": ["showtitle", "file", "playcount", "lastplayed", "resume"] }, "id": 1}' % includedShow
+		tvShowIds.append(includedShow)
+
+
+for tvShowId in tvShowIds:
+		command = '{"jsonrpc": "2.0", "method": "VideoLibrary.GetEpisodes", "params": { "tvshowid": %d, "properties": ["showtitle", "file", "playcount", "lastplayed", "resume"] }, "id": 1}' % tvShowId
 		allEpisodes = json.loads(xbmc.executeJSONRPC(command))
 			
 		if allEpisodes['result']['limits']['total'] > 0:
-			for episode in allEpisodes['result']['episodes']:
-				if addon.getSetting("IncludeUnwatched") == "true" or episode['playcount'] > 0:
-					log("Added Episode: " + episode['label'].encode('utf-8').strip())
-					myEpisodes.append({'episodeId': episode['episodeid'], 'episodeShow': episode['showtitle'].encode('utf-8').strip(), 'episodeName': episode['label'].encode('utf-8').strip(), 'episodeFile': episode['file'].encode('utf-8').strip(), 'playCount': episode['playcount'], 'lastPlayed': episode['lastplayed'], 'resume': episode['resume']})
-		
+			tvShowEpisodes[tvShowId] = allEpisodes		
+
+myEpisodes.extend(randomEpisodes(playlistSizeLimit, tvShowEpisodes, tvShowIds, showProbablities))
 
 log("Total Episodes: " + str(len(myEpisodes)))
 
@@ -217,18 +306,31 @@ while (not xbmc.Monitor().waitForAbort(1)):
 			log("-- lastEpisode")
 			if addon.getSetting("UpdatePlayCount") == "false":
 				log("-- Start ResetPlayCount Thread")
-				thread = threading.Thread(target=ResetPlayCount, args=(myEpisodes[lastEpisode],))
+				thread = threading.Thread(target=ResetPlayCount, args=(episodesInPlaylist[lastEpisode],))
 				thread.start()
 			#
 		#
 
-		log("-- Started: " + myEpisodes[myPlaylist.getposition()]['episodeShow'] + " - " + myEpisodes[myPlaylist.getposition()]['episodeName'])
-		if addon.getSetting("ShowNotifications") == "true": xbmc.executebuiltin('Notification(%s, %s, %d, %s)'%(name, myEpisodes[myPlaylist.getposition()]['episodeShow'] + "\r\n" + myEpisodes[myPlaylist.getposition()]['episodeName'], 5000, icon))
+		showName = episodesInPlaylist[myPlaylist.getposition()]['episodeShow']
+		episodeName = episodesInPlaylist[myPlaylist.getposition()]['episodeName']
+
+		log("-- Started: " + showName + " - " + episodeName)
+		if addon.getSetting("ShowNotifications") == "true": 
+			xbmc.executebuiltin('Notification(%s, %s, %d, %s)'%(name, showName + "\r\n" + episodeName, 5000, icon))
 		
 		log("-- Playlist Position: " + str(myPlaylist.getposition()))
+
+
+		if myPlaylist.size() - myPlaylist.getposition() <= 2:
+			log("-- Playlist about to end, lets backfil")
+			itemsToBackfil = playlistSizeLimit - (myPlaylist.size() - myPlaylist.getposition())
+			addPlaylist(randomEpisodes(itemsToBackfil, tvShowEpisodes, tvShowIds))
+			log("-- Playlist backfilled, size=" + str(myPlaylist.size()))
+			log("-- current episodesInPlaylist=" + str(episodesInPlaylist))
 		
 		lastEpisode = myPlaylist.getposition()
 		player.mediaStarted = False
+
 	#
 
 
@@ -251,6 +353,11 @@ while (not xbmc.Monitor().waitForAbort(1)):
 				player.play(item=myPlaylist)
 			else:
 				player.scriptStopped = True
+		elif myPlaylist.size() - myPlaylist.getposition() <= 2:
+			log("-- Playlist about to end, lets backfil")
+			itemsToBackfil = playlistSizeLimit - (myPlaylist.size() - myPlaylist.getposition())
+			addPlaylist(randomEpisodes(itemsToBackfil, tvShowEpisodes, tvShowIds))
+			log("-- Playlist backfilled")
 		else:
 			log("-- Playlist still going")
 		#
@@ -263,7 +370,7 @@ while (not xbmc.Monitor().waitForAbort(1)):
 		log("--------- scriptStopped")
 		if addon.getSetting("UpdatePlayCount") == "false" and 'lastEpisode' in locals():
 			log("-- Start ResetPlayCount Thread")
-			thread = threading.Thread(target=ResetPlayCount, args=(myEpisodes[lastEpisode],))
+			thread = threading.Thread(target=ResetPlayCount, args=(episodesInPlaylist[lastEpisode],))
 			thread.start()
 		break
 	#
